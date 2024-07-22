@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8">
+  <script src="js/face-api.js"></script>
+  <script src="js/utility.js"></script>
+  <script type="text/javascript" src="https://code.jquery.com/jquery-2.1.1.min.js"></script>
+  <style>
+    #overlay,
+    .overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+
+    .short {
+      width: 50px;
+    }
+  </style>
+</head>
+
+<body>
+  <h3>人員建檔<img id="imgLoading" src="images/loading.gif" style="height: 20px;"></h3>
+  <input type="file" accept="image/*" id="imageUpload" disabled>
+  <img id="imagePreview" style="display: none;">
+
+  <div style="position: relative;" class="margin">
+    <video onloadedmetadata="onPlay(this)" id="inputVideo" autoplay muted playsinline></video>
+    <canvas id="overlay" />
+  </div>
+  <div id="fps_meter" class="row side-by-side">
+    <div>
+      <label for="time">Time:</label>
+      <input disabled value="-" id="time" type="text" class="short">
+      <label for="fps">Estimated Fps:</label>
+      <input disabled value="-" id="fps" type="text" class="short">
+      <input id="btnTakePhoto" type="button" value="拍照" onclick="onTakePhoto()" disabled>
+      <input id="inputName" type="text" placeholder="請輸入姓名" disabled />
+      <input id="btnSend" type="button" value="送出" onclick="onSumbit()" disabled>
+    </div>
+  </div>
+  <div id="user-image-container"></div>
+</body>
+<script>
+  let forwardTimes = [];
+
+  // 啟動 Camera
+  async function startWebcam() {
+    const video = $('#inputVideo').get(0);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      video.srcObject = stream;
+    } catch (error) {
+      console.error('Error accessing webcam:', error);
+    }
+  }
+
+  // 播放 Camera
+  async function onPlay() {
+    const videoEl = $('#inputVideo').get(0);
+
+    if (videoEl.paused || videoEl.ended || !isFaceDetectionModelLoaded())
+      return setTimeout(() => onPlay())
+
+    const options = getFaceDetectorOptions()
+
+    const ts = Date.now()
+
+    const result = await faceapi.detectSingleFace(videoEl, options)
+
+    updateTimeStats(Date.now() - ts)
+
+    if (result) {
+      const canvas = $('#overlay').get(0)
+      const dims = faceapi.matchDimensions(canvas, videoEl, true)
+      faceapi.draw.drawDetections(canvas, faceapi.resizeResults(result, dims))
+    }
+
+    setTimeout(() => onPlay(), 200);
+  }
+
+  // 更新時間統計
+  function updateTimeStats(timeInMs) {
+    forwardTimes = [timeInMs].concat(forwardTimes).slice(0, 30)
+    const avgTimeInMs = forwardTimes.reduce((total, t) => total + t) / forwardTimes.length
+    $('#time').val(`${Math.round(avgTimeInMs)} ms`)
+    $('#fps').val(`${faceapi.utils.round(1000 / avgTimeInMs)}`)
+  }
+
+  // 抓取視訊畫面，並顯示在 Image 上
+  async function onTakePhoto(element) {
+    let video = $('#inputVideo').get(0);
+
+    if (element) video = element;
+
+    // 偵測單個人臉
+    const detection = await faceapi.detectSingleFace(video)
+      .withFaceLandmarks()
+      .withFaceDescriptor();
+
+    if (!detection) return;
+    
+    // 如果檢測到人臉，創建 Canvas 並剪裁人臉區域後，取得該區域的特徵向量和圖片
+    const img = document.createElement('img');
+    img.className = 'user-image';
+    img.style.width = '100px';
+
+    // 雙擊圖片刪除
+    img.addEventListener('dblclick', function () {
+      this.remove();
+    });
+
+    const box = detection.detection.box;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+
+    // 設置 Canvas 尺寸為人臉區域尺寸
+    canvas.width = box.width;
+    canvas.height = box.height;
+
+    // 將人臉區域剪裁到 Canvas 上
+    ctx.drawImage(video, box.x, box.y, box.width, box.height, 0, 0, box.width, box.height);
+
+    // 計算人臉特徵向量
+    const descriptors = await faceapi.computeFaceDescriptor(canvas);
+
+    // 將 Canvas 轉換為 Blob 並將特徵向量附加到 Image 上
+    canvas.toBlob((blob) => {
+      img.src = URL.createObjectURL(blob);
+
+      // 將 Float32Array 轉換為陣列
+      const json = JSON.stringify(Array.from(descriptors));
+      img.setAttribute('data-descriptor', json);
+
+      $('#user-image-container').get(0).appendChild(img);
+    });
+  }
+
+  // 將 Blob 轉換為 base64
+  async function fetchBlobAsBase64(blobUrl) {
+    const response = await fetch(blobUrl);
+    const blob = await response.blob();
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result.split(',')[1]); // 只返回 base64 部分
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  }
+
+  // 送出人員建檔
+  async function onSumbit() {
+    // 抓取所有 user-image 的圖片，並將其特徵向量存入陣列，並呼叫 API 送出
+    const images = $('.user-image');
+    const name = $('#inputName').val();
+
+    // 為空的錯誤訊息
+    if (!name) {
+      alert('請輸入姓名');
+      return;
+    }
+
+    if (!images.length) {
+      alert('請拍照或上傳檔案');
+      return;
+    }
+
+    const descriptors = [];
+
+    for (let i = 0; i < images.length; i++) {
+      const img = images[i];
+      const base64 = await fetchBlobAsBase64(img.src);
+      // console.log('blob', base64);
+
+      const item = {
+        image: base64,
+        vectors: JSON.parse(img.getAttribute('data-descriptor'))
+      };
+
+      descriptors.push(item);
+    }
+
+    const data = {
+      name,
+      metadatas: descriptors
+    };
+
+    // console.log('data', data);
+
+    // 透過 API 將圖片和特徵向量送出
+    $.ajax({
+      url: 'https://localhost:5000/api/UserFace/Add',
+      type: 'POST',
+      data: JSON.stringify(data),
+      contentType: 'application/json',
+      success: function (data) {
+        alert('建檔成功');
+      },
+      error: function (error) {
+        alert('建檔失敗');
+        console.error('error', error);
+      }
+    });
+  }
+
+  $(document).ready(function () {
+    // 加載模型
+    Promise.all([
+      faceapi.nets.ssdMobilenetv1.loadFromUri('/weights'),
+      faceapi.loadFaceRecognitionModel('/weights'),
+      faceapi.loadFaceLandmarkModel('/weights'),
+      startWebcam()
+    ]).then(() => {
+      $('#imgLoading').hide();
+      $('#btnTakePhoto').prop('disabled', false);
+      $('#inputName').prop('disabled', false);
+      $('#btnSend').prop('disabled', false);
+      $('#imageUpload').prop('disabled', false);
+    });
+
+    // 選擇圖片後
+    $('#imageUpload').on('change', function (event) {
+      const file = event.target.files[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = function (e) {
+          const imgBlob = new Blob([new Uint8Array(e.target.result)], { type: file.type });
+          const imgUrl = URL.createObjectURL(imgBlob);
+          $('#imagePreview').attr('src', imgUrl);
+
+          onTakePhoto($('#imagePreview').get(0));
+          $('#imageUpload').val('');
+        };
+        reader.readAsArrayBuffer(file);
+      }
+    });
+  }); 
+</script>
+
+</html>

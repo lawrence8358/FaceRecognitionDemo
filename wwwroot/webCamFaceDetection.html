@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8">
+  <script src="js/face-api.js"></script>
+  <script src="js/utility.js"></script>
+  <script src="face_liveness/Emscrippeng_test.js"></script>
+  <script type="text/javascript" src="https://code.jquery.com/jquery-2.1.1.min.js"></script>
+  <style>
+    #overlay,
+    .overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+    }
+
+    .short {
+      width: 50px;
+    }
+
+    #div_liveness {
+      position: absolute;
+      top: 0;
+      left: 0;
+      padding: 10px;
+      background: black;
+      color: red;
+    }
+
+    #div_result {
+      position: absolute;
+      top: 0;
+      right: 0;
+      padding: 10px;
+      background: green;
+      color: white;
+    }
+
+    .error {
+      background: red !important;
+    }
+  </style>
+</head>
+
+<body>
+  <h3>人員偵測<img id="imgLoading" src="images/loading.gif" style="height: 20px;"></h3>
+
+  <img id="imgSmallFace" style="width: 100px; display: none;" />
+  <div style="position: relative; width: 640px;">
+    <div id="div_liveness">無法辨識，請重新調整位置</div>
+    <div id="div_result" style="display: none;"></div>
+    <video onloadedmetadata="onPlay(this)" id="inputVideo" autoplay muted playsinline width="640" height="480"></video>
+    <canvas id="overlay" />
+  </div>
+  <div id="fps_meter" class="row side-by-side">
+    <div>
+      <label for="time">Time:</label>
+      <input disabled value="-" id="time" type="text" class="short">
+      <label for="fps">Estimated Fps:</label>
+      <input disabled value="-" id="fps" type="text" class="short">
+    </div>
+  </div>
+</body>
+<script>
+  let forwardTimes = [];
+
+  const sendThreshold = 3; // 靜止幾次後發送的閾值
+
+  let livenessCount = 0;  // 通過檢查次數
+
+  /** 啟動 Camera */
+  async function startWebcam() {
+    const video = $('#inputVideo').get(0);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      video.srcObject = stream;
+    } catch (error) {
+      console.error('Error accessing webcam:', error);
+    }
+  }
+
+  /** 播放 Camera */
+  async function onPlay() {
+    const videoEl = $('#inputVideo').get(0);
+    $('#div_result').hide();
+
+    if (videoEl.paused || videoEl.ended || !isFaceDetectionModelLoaded())
+      return setTimeout(() => onPlay())
+
+    const options = getFaceDetectorOptions()
+
+    const ts = Date.now()
+
+    const detection = await faceapi.detectSingleFace(videoEl, options).withFaceLandmarks().withFaceDescriptor();;
+
+    updateTimeStats(Date.now() - ts)
+
+    const canvas = $('#overlay').get(0)
+    const context = canvas.getContext('2d');
+
+    // 沒有偵測到人臉
+    if (!detection) {
+      livenessCount = 0;
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      setTimeout(() => onPlay(), 200);
+      return;
+    }
+
+    // 框出人臉區域
+    const dims = faceapi.matchDimensions(canvas, videoEl, true);
+    const resizeResult = faceapi.resizeResults(detection, dims);
+    faceapi.draw.drawDetections(canvas, resizeResult);
+
+    // 切割出人臉區域並進行活體檢測
+    const imageData = cropFaceRegion(detection, videoEl);
+    const isLiveness = livenessDetection(imageData);
+    if (!isLiveness) {
+      livenessCount = 0;
+      setTimeout(() => onPlay(), 200);
+      return;
+    }
+
+    livenessCount++;
+
+    // 辨識次數達到閾值，則發送請求
+    if (livenessCount >= sendThreshold) {
+      const apiResult = await Sumbit(detection.descriptor)
+      $('#div_result').show();
+
+      if (apiResult.label === 'unknown') {
+        $('#div_result').addClass('error');
+        $('#div_result').text(`陌生人,distance:${apiResult.distance}`);
+      }
+      else {
+        $('#div_result').text(`Hello ${apiResult.label},distance:${apiResult.distance}`);
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 2000)); // 阻塞畫面 2 秒
+
+      livenessCount = 0;
+    }
+
+    setTimeout(() => onPlay(), 200);
+    $('#div_result').hide();
+    $('#div_result').removeClass('error');
+  }
+
+  /** 更新時間統計 */
+  function updateTimeStats(timeInMs) {
+    forwardTimes = [timeInMs].concat(forwardTimes).slice(0, 30)
+    const avgTimeInMs = forwardTimes.reduce((total, t) => total + t) / forwardTimes.length
+    $('#time').val(`${Math.round(avgTimeInMs)} ms`)
+    $('#fps').val(`${faceapi.utils.round(1000 / avgTimeInMs)}`)
+  }
+
+  /** 送出人臉辨識請求 */
+  async function Sumbit(descriptor) {
+    const vectors = Array.from(descriptor); // 將 Float32Array 轉換為陣列
+    return await $.ajax({
+      url: '/api/UserFace/Match',
+      type: 'POST',
+      contentType: 'application/json',
+      data: JSON.stringify({ vectors })
+    });
+  }
+
+  /** 擷取人臉區域 */
+  function cropFaceRegion(detection, video) {
+    const box = detection.detection.box;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+
+    // 設置 Canvas 尺寸為人臉區域尺寸
+    // const boxWidth = box.width;
+    // const boxHeight = box.height;
+    // canvas.width = boxWidth;
+    // canvas.height = boxHeight;
+
+    // // 將人臉區域剪裁到 Canvas 上
+    // ctx.drawImage(video, box.x, box.y, boxWidth, boxHeight, 0, 0, boxWidth, boxHeight);
+
+    // 將 box 區域放大 2 倍
+    const boxWidth = box.width * 2;
+    const boxHeight = box.height * 2;
+    canvas.width = boxWidth;
+    canvas.height = boxHeight;
+
+    // 將人臉區域剪裁到 Canvas 上
+    ctx.drawImage(video, box.x - box.width / 2, box.y - box.height / 2, boxWidth, boxHeight, 0, 0, boxWidth, boxHeight);
+
+    const result = canvas.toDataURL('image/jpeg', 1);
+    $('#imgSmallFace').attr('src', result);
+
+    return result;
+  }
+
+  /** 活體檢測 */
+  function livenessDetection(imageData) {
+    // const canvas = document.createElement('canvas');
+    // const webcam = $('#inputVideo').get(0);
+    // canvas.width = webcam.width;
+    // canvas.height = webcam.height;
+
+    // const context = canvas.getContext('2d');
+    // context.drawImage(webcam, 0, 0, canvas.width, canvas.height);
+
+    // const imageData = canvas.toDataURL('image/jpeg', 0.4);
+
+    const utf8Encoder = new TextEncoder('utf-8');
+    const encodedData = utf8Encoder.encode(imageData);
+
+    // console.log('encodedData', encodedData);  
+
+    // Allocate memory
+    const dst = _malloc(encodedData.length + 1); // +1 for null terminator
+
+    // Copy data to the memory
+    HEAPU8.set(encodedData, dst);
+
+    // Null-terminate the string in memory
+    HEAPU8[dst + encodedData.length] = 0;
+
+    // Assuming _nentendo is a function for further processing
+    const result = _nentendo(dst);
+
+    // Free the allocated memory
+    _free(dst);
+
+    let isLiveness = result > 0.90;
+    // isLiveness = true; // 暫時關閉活體檢測
+
+    if (!isLiveness) $('#div_liveness').show();
+    else $('#div_liveness').hide();
+
+    return isLiveness;
+  }
+
+  $(document).ready(function () {
+    // 加載模型
+    Promise.all([
+      faceapi.nets.ssdMobilenetv1.loadFromUri('/weights'),
+      faceapi.loadFaceRecognitionModel('/weights'),
+      faceapi.loadFaceLandmarkModel('/weights'),
+      startWebcam()
+    ]).then(() => {
+      $('#imgLoading').hide();
+    });
+  }); 
+</script>
+
+</html>

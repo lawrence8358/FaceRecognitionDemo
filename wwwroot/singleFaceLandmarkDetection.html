@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8">
+  <script src="js/face-api.js"></script>
+  <script src="js/utility.js"></script>
+  <script type="text/javascript" src="https://code.jquery.com/jquery-2.1.1.min.js"></script>
+</head>
+
+<body>
+  <h3>單人特徵向量擷取<img id="imgLoading" src="images/loading.gif" style="height: 20px;"></h3>
+
+  <div>
+    <div style="margin-bottom: 8px;">
+      <label for="selectFaceType">選擇人臉圖片</label>
+      <select id="selectFaceType" disabled></select><br>
+    </div>
+    <img id="inputImg" src="" style="max-width: 300px; max-height: 300px;" />
+  </div>
+  <div>
+    臉部局部裁剪<br>
+    <canvas id="myCanvas" style="max-width: 300px; max-height: 300px;"></canvas>
+  </div>
+  <div>
+    <label for="faceDescriptor">臉部局部特徵向量</label>
+    <textarea id="faceDescriptor" style="width: 100%; height: 200px;"></textarea>
+  </div>
+</body>
+
+<script>
+  async function start() {
+    // 加載圖片
+    const img = await faceapi.fetchImage(`images/${$('#selectFaceType').val()}.jpg`);
+    console.log('Image loaded:', img.width, img.height);
+
+    // 偵測單個人臉
+    const detection = await faceapi.detectSingleFace(img).withFaceLandmarks().withFaceDescriptor();
+    console.log('Face detection:', detection);
+    
+    // 如果檢測到人臉，創建 Canvas 並剪裁顯示人臉區域並計算特徵向量
+    if (detection) {
+      const box = detection.detection.box;
+      const canvas = document.getElementById('myCanvas');
+      const ctx = canvas.getContext('2d');
+
+      // 設置 Canvas 尺寸為人臉區域尺寸
+      canvas.width = box.width;
+      canvas.height = box.height;
+
+      // 將人臉區域剪裁到 Canvas 上
+      ctx.drawImage(img, box.x, box.y, box.width, box.height, 0, 0, box.width, box.height);
+
+      // 計算人臉特徵向量
+      const descriptors = await faceapi.computeFaceDescriptor(canvas);
+
+      // 將 Float32Array 轉換為陣列
+      const json = JSON.stringify(Array.from(descriptors));
+      $('#faceDescriptor').val(json);
+    } else {
+      console.error('No face detected!');
+    }
+  }
+
+  $(document).ready(function () {
+    // 加載模型
+    Promise.all([
+      faceapi.nets.ssdMobilenetv1.loadFromUri('/weights'),
+      faceapi.nets.faceLandmark68Net.loadFromUri('/weights'),
+      faceapi.nets.faceRecognitionNet.loadFromUri('/weights'),
+      // faceapi.loadFaceRecognitionModel('/weights'),
+      // faceapi.loadFaceLandmarkModel('/weights')
+      initSelectAsync()
+    ]).then(() => {
+      start();
+      $('#imgLoading').hide();
+      $('#selectFaceType').prop('disabled', false);
+    });
+
+    $('#selectFaceType').on('change', async () => {
+      await loadImageFromUrl(`images/${$('#selectFaceType').val()}.jpg`)
+      start();
+    });
+  })
+</script>
+
+</html>

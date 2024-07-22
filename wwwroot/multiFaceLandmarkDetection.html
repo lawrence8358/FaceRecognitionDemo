@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <script src="js/face-api.js"></script>
+    <script src="js/utility.js"></script>
+    <script type="text/javascript" src="https://code.jquery.com/jquery-2.1.1.min.js"></script>
+    <style>
+        #overlay,
+        .overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+    </style>
+</head>
+
+<body>
+    <h3>多人偵測<img id="imgLoading" src="images/loading.gif" style="height: 20px;"></h3>
+    <div style="margin-bottom: 8px;">
+        <label for="selectFaceType">選擇人臉圖片</label>
+        <select id="selectFaceType" disabled></select><br>
+    </div>
+    <div style="position: relative">
+        <img id="inputImg" src="" style="max-width: 800px; max-height: 400px;" />
+        <canvas id="overlay" />
+    </div>
+</body>
+
+<script> 
+    let faceMatcher = null
+
+    async function updateResults() {
+        if (!isFaceDetectionModelLoaded()) {
+            return
+        }
+
+        const inputImgEl = $('#inputImg').get(0)
+
+        const options = getFaceDetectorOptions()
+        const results = await faceapi
+            .detectAllFaces(inputImgEl, options)
+            .withFaceLandmarks()
+            .withFaceDescriptors();
+
+        drawFaceRecognitionResults(results);
+
+        console.log('updateResults results', results);
+
+        // const result = await faceapi.detectSingleFace(inputImgEl).withFaceLandmarks().withFaceDescriptor();
+        // console.dir(result);
+    }
+
+    function drawFaceRecognitionResults(results) {
+        // 取得畫布元素
+        const canvas = $('#overlay').get(0)
+        // 取得輸入圖像元素
+        const inputImgEl = $('#inputImg').get(0)
+
+        // 調整畫布尺寸以匹配輸入圖像
+        faceapi.matchDimensions(canvas, inputImgEl)
+
+        // 調整偵測結果和地標，以防顯示的圖像小於原始尺寸
+        const resizedResults = faceapi.resizeResults(results, inputImgEl)
+
+        // 對每個偵測結果進行處理
+        resizedResults.forEach(({ detection, descriptor }) => {
+            // 找到最佳匹配的標籤
+            const label = faceMatcher.findBestMatch(descriptor).toString()
+            const options = { label }
+
+            // 建立和繪製包含標籤的框
+            const drawBox = new faceapi.draw.DrawBox(detection.box, options)
+            drawBox.draw(canvas)
+
+            // 建立標籤框
+            // faceapi.draw.drawDetections(canvas, resizedResults);
+
+            // 繪製 68 個人臉地標
+            faceapi.draw.drawFaceLandmarks(canvas, resizedResults)
+        })
+    }
+
+    // 定義臉部辨識的類別名稱（人物名稱）
+    const classes = [
+        'amy',
+        'bernadette',
+        'howard',
+        'leonard',
+        'penny',
+        'raj',
+        'sheldon',
+        'stuart'
+    ];
+
+    // 抓取每個類別的第一張圖片並計算其特徵向量
+    async function createBbtFaceMatcher(numImagesForTraining = 1) {
+
+        const maxAvailableImagesPerClass = 5
+        // 訓練用的圖片數量不能超過每個類別可用的最大圖片數量
+        numImagesForTraining = Math.min(numImagesForTraining, maxAvailableImagesPerClass)
+
+        // 抓取每個類別的臉部特徵向量
+        const labeledFaceDescriptors = await Promise.all(classes.map(
+            async className => {
+
+                // 讀取 json 檔案，如果已經存在，則直接使用
+                try {
+                    const result = await $.getJSON(`json/${className}.json`);
+                    const descriptors = result.vectors.map(d => new Float32Array(d));
+                    console.log('descriptors from json', descriptors);
+
+                    // 建立並返回帶有標籤的臉部特徵向量
+                    return new faceapi.LabeledFaceDescriptors(
+                        result.name,
+                        descriptors
+                    );
+                }
+                catch (e) {
+                    // console.warn(e);
+                }
+
+                const descriptors = []
+                for (let i = 1; i < (numImagesForTraining + 1); i++) {
+                    // 抓取圖片
+                    const img = await faceapi.fetchImage(getFaceImageUri(className, i))
+
+                    // 計算圖片的臉部特徵向量
+                    const des = await faceapi.computeFaceDescriptor(img);
+                    descriptors.push(des);
+                }
+
+                // 儲存 JSON 用 
+                const json = {
+                    name: className,
+                    vectors: descriptors.map(des => Array.from(des)) // 將 Float32Array 轉換為陣列
+                }
+                console.log(`${className} : json`, JSON.stringify(json));
+                console.log('descriptors from image', descriptors);
+
+                // 建立並返回帶有標籤的臉部特徵向量
+                return new faceapi.LabeledFaceDescriptors(
+                    className,
+                    descriptors
+                )
+            }
+        ))
+
+        // 使用標籤臉部特徵向量建立臉部匹配器
+        return new faceapi.FaceMatcher(labeledFaceDescriptors)
+    }
+
+    async function init() {
+        await initSelectAsync();
+        // FaceDetectionNet
+        await faceapi.nets.ssdMobilenetv1.load('/weights');
+        console.log('face detection weights loaded', faceapi.nets.ssdMobilenetv1.params);
+
+        await faceapi.loadFaceRecognitionModel('/weights');
+        console.log('face recognition weights loaded', faceapi.nets.faceRecognitionNet.params);
+
+        await faceapi.loadFaceLandmarkModel('/weights');
+        console.log('face landmark weights loaded', faceapi.nets.faceLandmark68Net.params);
+
+        // initialize face matcher with 1 reference descriptor per bbt character
+        faceMatcher = await createBbtFaceMatcher(2)
+        console.log('face matcher loaded', faceMatcher);
+
+        $('#imgLoading').hide();
+        $('#selectFaceType').prop('disabled', false);
+
+        updateResults()
+    }
+
+    $(document).ready(function () {
+        init();
+
+        $('#selectFaceType').on('change', async () => {
+            await loadImageFromUrl(`images/${$('#selectFaceType').val()}.jpg`)
+            updateResults()
+        });
+    })
+</script>
+
+</html>

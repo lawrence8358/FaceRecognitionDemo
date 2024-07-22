@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body,
+        html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            overflow: hidden;
+        }
+
+        div {
+            display: flex;
+            justify-content: center;
+            padding: 10px;
+            background-color: #f0f0f0;
+        }
+
+        iframe {
+            width: 100%;
+            height: calc(100% - 50px);
+            border: none;
+        }
+    </style>
+</head>
+
+<body>
+    <div>
+        <input type="button" value="人員偵測" onclick="changeIframeUrl('webCamFaceDetection.html')">&nbsp;
+        <input type="button" value="人員建檔" onclick="changeIframeUrl('webCamFaceCreate.html')">&nbsp;
+        <input type="button" value="多人偵測" onclick="changeIframeUrl('multiFaceLandmarkDetection.html')">&nbsp;
+        <input type="button" value="單人特徵向量擷取" onclick="changeIframeUrl('singleFaceLandmarkDetection.html')">
+    </div>
+    <iframe id="iframe" src="webCamFaceDetection.html"></iframe>
+</body>
+
+<script>
+    function changeIframeUrl(url) {
+        document.getElementById('iframe').src = url;
+    }
+</script>
+
+</html>
